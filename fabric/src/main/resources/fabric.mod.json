@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "kizuna_navigation",
+  "version": "${version}",
+  "name": "Kizuna Pathfinding Framework",
+  "description": "独立的地面寻路与实体托管库。",
+  "authors": ["Kizunad"],
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "environment": "*",
+  "entrypoints": {"main": ["dev.kizuna.navigation.fabric.NavigationMod"]},
+  "mixins": ["kizuna_navigation.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.16.10",
+    "minecraft": "1.20.1",
+    "java": ">=17",
+    "fabric-api": ">=0.92.3+1.20.1"
+  }
+}

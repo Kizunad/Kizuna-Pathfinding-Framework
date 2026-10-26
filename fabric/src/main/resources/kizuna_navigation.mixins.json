@@ -1,0 +1,7 @@
+{
+  "required": true,
+  "package": "dev.kizuna.navigation.fabric.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": ["MobNavigationAccessor"],
+  "injectors": {"defaultRequire": 1}
+}

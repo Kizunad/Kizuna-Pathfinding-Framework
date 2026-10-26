@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "kizuna_navigation_test",
+  "version": "1.0.0",
+  "name": "Navigation GameTest",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.kizuna.navigation.fabric.test.NavigationTestMod"],
+    "fabric-gametest": [
+      "dev.kizuna.navigation.fabric.test.NavigationGameTest",
+      "dev.kizuna.navigation.fabric.test.NavigationTerrainGameTest",
+      "dev.kizuna.navigation.fabric.test.NavigationLifecycleGameTest"
+    ]
+  },
+  "mixins": ["kizuna_navigation_test.mixins.json"],
+  "depends": {"kizuna_navigation": "*"}
+}
