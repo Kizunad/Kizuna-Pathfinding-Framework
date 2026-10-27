@@ -67,6 +67,13 @@ Java 行宽和 Git 忽略项，不能仅凭空 diff 宣称源码已验证。
 
 ## 覆盖范围
 
+`AStarPlannerTest` 与 `NavigationGameTest` 同时覆盖已达成的半径、区域、远离目标空路径，
+以及表示点远而最近满足点在范围内的请求。`cancellationCallbackKeepsEveryAcceptedTicketTerminal`
+验证同步取消回调提交新请求后，每张已接纳票据均结束；另覆盖停止重入和释放时拒绝新提交。
+`fullQueueAllowsReplacingOwnPendingRequest` 验证满队列下自身替换仍成功且旧票据取消；
+`fullQueueRejectsAnotherEntity` 验证其他实体仍被容量限制拒绝，原请求继续有效。
+core 另验证自定义目标的高代价下界不会被误用为几何距离剪枝。
+
 - core：一格台阶、两格跳高与头顶阻挡、三格空隙及能力不足、安全下落边界、全部危险类型绕行、
   下落途中危险、重复输入完全一致、节点预算和范围、实体宽度、自定义能力和被否决边、非法代价、
   不可变快照、门/水/攀爬权限、全部声明高度的弹道，以及下表中的多格跳跃、斜向和按需读取用例。

@@ -106,8 +106,11 @@ public final class KizunaNavigation extends MobNavigation implements NavHandle {
 
     @Override
     public NavTicket planAsync(NavRequest request, NavPriority priority) {
-        // 新请求取代旧的排队任务；入队失败时保留正在跟随的路径状态。
+        // 先发布新请求再取消旧票据；取消回调重入时，后提交的请求拥有句柄。
         requireThread();
+        if (!isAttached()) {
+            throw new IllegalStateException("实体已解除托管或不可导航");
+        }
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(priority, "priority");
         NavigationSettings settings = KizunaNav.settings();
@@ -116,23 +119,21 @@ public final class KizunaNavigation extends MobNavigation implements NavHandle {
                 || budget.maxNodes() > settings.nodesPerTick()) {
             throw new IllegalArgumentException("请求超出近距离导航预算");
         }
-        cancelPending();
+        NavTicket previous = pending;
+        NavTicket ticket = enqueue(request, priority);
         rejectedMoves.clear();
         replans = 0;
         retryAt = 0;
-        try {
-            NavTicket ticket = enqueue(request, priority);
-            state = NavState.PLANNING;
-            return ticket;
-        } catch (RuntimeException error) {
-            state = follower == null ? NavState.IDLE : NavState.FOLLOWING;
-            throw error;
+        state = NavState.PLANNING;
+        if (previous != null) {
+            previous.cancel();
         }
+        return ticket;
     }
 
     private NavTicket enqueue(NavRequest request, NavPriority priority) {
         NavTicket ticket = new NavTicket(this::requireThread);
-        NavigationScheduler.enqueue(this, request, priority, ticket);
+        NavigationScheduler.enqueue(this, request, priority, ticket, pending);
         pending = ticket;
         return ticket;
     }
@@ -140,9 +141,6 @@ public final class KizunaNavigation extends MobNavigation implements NavHandle {
     PlanningResult calculate(NavRequest request) {
         // 在实际计算时刷新实体位置和参数，再按需读取本次搜索用到的方块。
         NavRequest actual = prepareRequest(request);
-        if (actual.start().distanceTo(actual.goal().anchor()) > actual.budget().maxDistance()) {
-            return new PlanningResult(actual, NavResult.failure(SearchStatus.GOAL_OUT_OF_RANGE, 0));
-        }
         AStarPlanner planner = new AStarPlanner(KizunaNav.capabilities());
         NavResult result = planner.plan(WorldSnapshots.capture((ServerWorld) world, actual, entity),
                 actual, rejectedMoves);
@@ -161,6 +159,7 @@ public final class KizunaNavigation extends MobNavigation implements NavHandle {
     void accept(NavTicket ticket, NavRequest request, PlanningResult calculation) {
         // 只应用仍归本实体所有的请求结果，规划成功后再替换旧执行计划。
         if (pending != ticket || ticket.isCancelled() || !isAttached()) {
+            ticket.cancel();
             return;
         }
         pending = null;
@@ -306,19 +305,14 @@ public final class KizunaNavigation extends MobNavigation implements NavHandle {
 
     @Override
     public void stop() {
-        // 同步取消规划和执行并清除恢复目标，使旧回调不能恢复已停止的导航。
+        // 清除当前目标后才通知取消，回调提交的新请求可保留自己的规划状态。
         requireThread();
-        cancelPending();
+        NavTicket previous = pending;
+        pending = null;
         clearFollower();
         activeRequest = null;
         retryAt = 0;
         state = NavState.IDLE;
-    }
-
-    private void cancelPending() {
-        // 先解除句柄引用再触发取消回调，允许回调安全提交新请求。
-        NavTicket previous = pending;
-        pending = null;
         if (previous != null) {
             previous.cancel();
         }

@@ -38,7 +38,7 @@ public final class NavGoals {
         }
 
         @Override
-        public double lowerBound(GridPos position) {
+        public double distanceLowerBound(GridPos position) {
             return Math.max(0, position.distanceTo(anchor) - radius);
         }
     }
@@ -55,8 +55,8 @@ public final class NavGoals {
         }
 
         @Override
-        public double lowerBound(GridPos position) {
-            // 把当前位置夹到区域内最近的点，所得距离不会高估剩余代价。
+        public double distanceLowerBound(GridPos position) {
+            // 把当前位置夹到区域内最近的点，所得距离不会高估到目标集合的距离。
             GridPos min = bounds.min();
             GridPos max = bounds.max();
             int x = Math.max(min.x(), Math.min(position.x(), max.x()));
@@ -73,7 +73,7 @@ public final class NavGoals {
         }
 
         @Override
-        public double lowerBound(GridPos position) {
+        public double distanceLowerBound(GridPos position) {
             return Math.max(0, radius - position.distanceTo(anchor));
         }
     }

@@ -18,11 +18,16 @@ final class NavigationScheduler {
     private NavigationScheduler() {
     }
 
-    static void enqueue(KizunaNavigation navigation, NavRequest request, NavPriority priority, NavTicket ticket) {
-        // 清理已取消项后限制队列长度，优先级相同的请求按提交顺序处理。
+    static void enqueue(KizunaNavigation navigation, NavRequest request, NavPriority priority,
+                        NavTicket ticket, NavTicket previous) {
+        // 自身旧排队项不占替换容量；取消通知由句柄在发布新票据后执行。
         MinecraftServer server = navigation.server();
+        if (server.isStopping()) {
+            throw new IllegalStateException("服务器正在停止，无法接纳导航请求");
+        }
         NavigationScheduler scheduler = SERVERS.computeIfAbsent(server, ignored -> new NavigationScheduler());
-        scheduler.queue.removeIf(entry -> entry.ticket().isCancelled());
+        scheduler.queue.removeIf(entry -> entry.ticket().isCancelled()
+                || entry.navigation() == navigation && entry.ticket() == previous);
         if (scheduler.queue.size() >= KizunaNav.settings().maxQueuedRequests()) {
             throw new IllegalStateException("导航请求队列已满");
         }

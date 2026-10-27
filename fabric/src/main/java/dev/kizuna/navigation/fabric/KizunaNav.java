@@ -98,11 +98,11 @@ public final class KizunaNav {
     }
 
     public static void release(MobEntity mob) {
-        // 取消本库持有的任务后还原原实例，保留宿主设置过的导航状态。
+        // 先还原原实例再取消任务，取消回调不能向已释放的句柄提交新请求。
         requireServerThread(mob);
         if (mob.getNavigation() instanceof KizunaNavigation managed) {
-            managed.stop();
             ((MobNavigationAccessor) mob).kizunaNavigation$setNavigation(managed.originalNavigation());
+            managed.stop();
         }
     }
 

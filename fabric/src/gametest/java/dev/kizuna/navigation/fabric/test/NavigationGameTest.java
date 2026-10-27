@@ -1,10 +1,15 @@
 package dev.kizuna.navigation.fabric.test;
 
 import dev.kizuna.navigation.core.BodySize;
+import dev.kizuna.navigation.core.GridBounds;
+import dev.kizuna.navigation.core.GridPos;
 import dev.kizuna.navigation.core.MoveKind;
 import dev.kizuna.navigation.core.MovementLimits;
 import dev.kizuna.navigation.core.MovementPermission;
 import dev.kizuna.navigation.core.NavProfile;
+import dev.kizuna.navigation.core.NavGoal;
+import dev.kizuna.navigation.core.NavGoals;
+import dev.kizuna.navigation.core.NavRequest;
 import dev.kizuna.navigation.core.NavResult;
 import dev.kizuna.navigation.core.SearchStatus;
 import dev.kizuna.navigation.fabric.KizunaNav;
@@ -29,12 +34,15 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Set;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
+import java.util.function.Function;
 
 public final class NavigationGameTest implements FabricGameTest {
     private static final int TICK_LIMIT = 300;
@@ -53,8 +61,223 @@ public final class NavigationGameTest implements FabricGameTest {
     private static final double ARRIVAL_DISTANCE = 0.7;
     private static final int EAGER_READ_BASELINE = 188_538;
     private static final int MIN_READ_REDUCTION_FACTOR = 10;
+    private static final int DISTANT_ANCHOR = 100;
+    private static final int SAFE_RADIUS = 10;
+    private static final String QUEUE_FULL_MESSAGE = "导航请求队列已满";
     private static final BlockPos START = new BlockPos(1, FEET_Y, LANE_Z);
     private static final BlockPos TARGET = new BlockPos(TARGET_X, FEET_Y, LANE_Z);
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void reachedRadiusWithDistantCenterReturnsEmptyPlan(TestContext context) {
+        // 目标半径覆盖起点时，Fabric 接线也应接受空路径。
+        assertGoalPlan(context, start -> NavGoals.within(
+                start.offset(DISTANT_ANCHOR, 0, 0), DISTANT_ANCHOR), 0);
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void reachedRegionWithDistantCornerReturnsEmptyPlan(TestContext context) {
+        // 区域的最小角在范围外，不影响位于区域内的起点。
+        assertGoalPlan(context, start -> NavGoals.region(
+                new GridBounds(start.offset(-DISTANT_ANCHOR, 0, 0), start)), 0);
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void reachedAwayGoalWithDistantThreatReturnsEmptyPlan(TestContext context) {
+        // 已远离威胁的实体无需向威胁表示点寻路。
+        assertGoalPlan(context, start -> NavGoals.awayFrom(
+                start.offset(DISTANT_ANCHOR, 0, 0), SAFE_RADIUS), 0);
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void nearbyGoalBoundaryWithDistantCenterIsReachable(TestContext context) {
+        // 起点不满足目标，但最近满足点在搜索半径内。
+        assertGoalPlan(context, start -> NavGoals.within(
+                start.offset(DISTANT_ANCHOR, 0, 0), DISTANT_ANCHOR - 1), 1);
+    }
+
+    private static void assertGoalPlan(TestContext context, Function<GridPos, NavGoal> goals, int endOffset) {
+        // 从实体实际脚底构造目标，经公开异步入口验证规划终点和空路径语义。
+        flat(context);
+        var mob = context.spawnMob(EntityType.PILLAGER, START);
+        NavHandle handle = KizunaNav.takeOver(mob, NavigationGameTest::profile);
+        NavRequest base = handle.requestTo(context.getAbsolutePos(TARGET));
+        GridPos start = base.start();
+        NavGoal goal = goals.apply(start);
+        context.assertTrue(goal.reached(start) == (endOffset == 0), "夹具的起点达成状态错误");
+        NavRequest request = new NavRequest(start, goal, base.profile(), List.of(), base.budget());
+        CompletableFuture<NavResult> result = handle.planAsync(request).result().toCompletableFuture();
+        context.addInstantFinalTask(() -> {
+            context.assertTrue(result.isDone(), "规划尚未完成");
+            NavResult planned = result.join();
+            context.assertTrue(planned.status() == SearchStatus.SUCCESS, "目标集合应可达");
+            var plan = planned.plan().orElseThrow();
+            context.assertTrue(plan.end().equals(start.offset(endOffset, 0, 0)), "规划终点错误");
+            context.assertTrue(plan.edges().isEmpty() == (endOffset == 0), "空路径语义错误");
+            KizunaNav.release(mob);
+        });
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void cancellationCallbackKeepsEveryAcceptedTicketTerminal(TestContext context) {
+        // 取消回调同步重入时，后提交者成功，被替换的两张票据都必须取消。
+        flat(context);
+        var mob = context.spawnMob(EntityType.PILLAGER, START);
+        NavHandle handle = KizunaNav.takeOver(mob, NavigationGameTest::profile);
+        BlockPos target = context.getAbsolutePos(TARGET);
+        AtomicReference<NavTicket> reentrant = new AtomicReference<>();
+        NavTicket first = handle.navigateTo(target, 1);
+        CompletableFuture<NavResult> firstResult = first.result().toCompletableFuture();
+        firstResult.whenComplete((result, failure) -> reentrant.set(handle.navigateTo(target, 1)));
+        NavTicket outer = handle.navigateTo(target, 1);
+        NavTicket inner = reentrant.get();
+        context.assertTrue(first.isCancelled(), "首票据必须同步取消");
+        context.assertTrue(inner != null, "取消回调必须已提交重入请求");
+        context.assertTrue(outer.isCancelled(), "外层票据应被后提交的重入请求取消");
+        CompletableFuture<NavResult> innerResult = inner.result().toCompletableFuture();
+        context.addInstantFinalTask(() -> {
+            context.assertTrue(innerResult.isDone(), "重入票据必须结束");
+            context.assertTrue(innerResult.join().status() == SearchStatus.SUCCESS, "重入请求必须规划成功");
+            context.assertTrue(firstResult.isDone(), "首票据不能悬挂");
+            context.assertTrue(outer.result().toCompletableFuture().isDone(), "外层票据不能悬挂");
+            KizunaNav.release(mob);
+            context.assertTrue(innerResult.isDone(), "释放后重入票据仍应有终态");
+        });
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void fullQueueAllowsReplacingOwnPendingRequest(TestContext context) {
+        // 在同一 tick 填满队列，自身替换必须释放旧排队项的容量并最终规划成功。
+        flat(context);
+        var mob = context.spawnMob(EntityType.PILLAGER, START);
+        NavHandle handle = KizunaNav.takeOver(mob, NavigationGameTest::profile);
+        BlockPos target = context.getAbsolutePos(TARGET);
+        NavTicket first = handle.navigateTo(target, 1);
+        List<MobEntity> fillers = new ArrayList<>();
+        NavTicket replacement;
+        try {
+            fillRequestQueue(context, target, fillers);
+            replacement = handle.navigateTo(target, 1);
+            context.assertTrue(first.isCancelled(), "自身替换必须同步取消旧票据");
+            context.assertFalse(replacement.isCancelled(), "满队列不能取消已接纳的新票据");
+        } finally {
+            removeQueueFillers(fillers);
+        }
+        CompletableFuture<NavResult> result = replacement.result().toCompletableFuture();
+        context.addInstantFinalTask(() -> {
+            context.assertTrue(result.isDone(), "替换票据必须结束");
+            context.assertTrue(result.join().status() == SearchStatus.SUCCESS, "自身替换应规划成功");
+            KizunaNav.release(mob);
+        });
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void fullQueueRejectsAnotherEntity(TestContext context) {
+        // 其他实体不能占用已满队列，也不能取消原实体已接纳的请求。
+        flat(context);
+        var mob = context.spawnMob(EntityType.PILLAGER, START);
+        NavHandle handle = KizunaNav.takeOver(mob, NavigationGameTest::profile);
+        BlockPos target = context.getAbsolutePos(TARGET);
+        NavTicket first = handle.navigateTo(target, 1);
+        var other = context.spawnMob(EntityType.PILLAGER, START);
+        NavHandle otherHandle = KizunaNav.takeOver(other, NavigationGameTest::profile);
+        List<MobEntity> fillers = new ArrayList<>();
+        try {
+            fillRequestQueue(context, target, fillers);
+            assertQueueFull(context, otherHandle, target);
+            context.assertFalse(first.isCancelled(), "其他实体被拒绝不能取消原票据");
+            context.assertTrue(handle.state() == NavState.PLANNING, "原请求必须仍在排队");
+            context.assertTrue(otherHandle.state() == NavState.IDLE, "拒绝后不能发布新请求");
+        } finally {
+            removeQueueFillers(fillers);
+            KizunaNav.release(other);
+            other.discard();
+        }
+        CompletableFuture<NavResult> result = first.result().toCompletableFuture();
+        context.addInstantFinalTask(() -> {
+            context.assertTrue(result.isDone(), "原票据必须结束");
+            context.assertTrue(result.join().status() == SearchStatus.SUCCESS, "原请求应保持有效");
+            KizunaNav.release(mob);
+        });
+    }
+
+    private static void fillRequestQueue(TestContext context, BlockPos target, List<MobEntity> fillers) {
+        // 按配置上限有界填充共享队列，允许其他测试已有排队项，退出前确认容量已满。
+        int queueLimit = KizunaNav.settings().maxQueuedRequests();
+        for (int index = 0; index < queueLimit; index++) {
+            var mob = context.spawnMob(EntityType.PILLAGER, START);
+            fillers.add(mob);
+            NavHandle handle = KizunaNav.takeOver(mob, NavigationGameTest::profile);
+            try {
+                handle.navigateTo(target, 1);
+            } catch (IllegalStateException error) {
+                context.assertTrue(QUEUE_FULL_MESSAGE.equals(error.getMessage()), "填充应仅因队列已满结束");
+                return;
+            }
+        }
+        throw new IllegalStateException("夹具应在原请求之外填满队列");
+    }
+
+    private static void assertQueueFull(TestContext context, NavHandle handle, BlockPos target) {
+        // 只接受明确的队列容量拒绝，不能把其他提交错误当作通过。
+        try {
+            handle.navigateTo(target, 1);
+        } catch (IllegalStateException error) {
+            context.assertTrue(QUEUE_FULL_MESSAGE.equals(error.getMessage()), "应因队列已满拒绝其他实体");
+            return;
+        }
+        throw new IllegalStateException("满队列不应接纳其他实体的新请求");
+    }
+
+    private static void removeQueueFillers(List<MobEntity> fillers) {
+        // 同步清除填充请求与实体，避免将队列压力和实体碰撞带入后续 tick。
+        for (MobEntity mob : fillers) {
+            KizunaNav.release(mob);
+            mob.discard();
+        }
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
+    public void stopCancellationCallbackCanSubmitNewRequest(TestContext context) {
+        // 停止已清除旧目标，回调提交的新请求必须保留规划状态并最终完成。
+        flat(context);
+        var mob = context.spawnMob(EntityType.PILLAGER, START);
+        NavHandle handle = KizunaNav.takeOver(mob, NavigationGameTest::profile);
+        BlockPos target = context.getAbsolutePos(TARGET);
+        AtomicReference<NavTicket> reentrant = new AtomicReference<>();
+        NavTicket first = handle.navigateTo(target, 1);
+        first.result().whenComplete((result, failure) -> reentrant.set(handle.navigateTo(target, 1)));
+        handle.stop();
+        context.assertTrue(first.isCancelled(), "停止必须取消旧票据");
+        context.assertTrue(handle.state() == NavState.PLANNING, "新请求必须保留规划状态");
+        CompletableFuture<NavResult> result = reentrant.get().result().toCompletableFuture();
+        context.addInstantFinalTask(() -> {
+            context.assertTrue(result.isDone(), "停止回调中的新票据必须结束");
+            context.assertTrue(result.join().status() == SearchStatus.SUCCESS, "新请求应成功");
+            KizunaNav.release(mob);
+        });
+    }
+
+    @GameTest(templateName = EMPTY_STRUCTURE)
+    public void releaseRejectsSubmissionFromCancellationCallback(TestContext context) {
+        // 释放先解除托管，取消回调不能重新接纳已失去实体控制权的任务。
+        flat(context);
+        var mob = context.spawnMob(EntityType.PILLAGER, START);
+        NavHandle handle = KizunaNav.takeOver(mob, NavigationGameTest::profile);
+        BlockPos target = context.getAbsolutePos(TARGET);
+        AtomicReference<RuntimeException> rejected = new AtomicReference<>();
+        NavTicket first = handle.navigateTo(target, 1);
+        first.result().whenComplete((result, failure) -> {
+            try {
+                handle.navigateTo(target, 1);
+            } catch (RuntimeException error) {
+                rejected.set(error);
+            }
+        });
+        KizunaNav.release(mob);
+        context.assertTrue(first.isCancelled(), "释放必须取消票据");
+        context.assertTrue(rejected.get() instanceof IllegalStateException, "释放后的重入提交必须明确拒绝");
+        context.complete();
+    }
 
     @GameTest(templateName = EMPTY_STRUCTURE, tickLimit = TICK_LIMIT)
     public void runtimeManagedPillagerCrossesThreeBlockGap(TestContext context) {

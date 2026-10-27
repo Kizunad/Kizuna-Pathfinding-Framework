@@ -30,11 +30,72 @@ public class AStarPlannerTest {
     private static final int REPEAT_COUNT = 20;
     private static final int CEILING_HEIGHT = 3;
     private static final int BARRIER_HEIGHT = 5;
+    private static final int DISTANT_ANCHOR = 100;
+    private static final int SAFE_RADIUS = 10;
     private static final int[][] DIRECTIONS = {
             {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
     private static final GridPos START = new GridPos(0, 1, 0);
     private static final NavProfile PROFILE = profile(new MovementLimits(1, JUMP_HEIGHT, DROP_LIMIT, GAP_WIDTH));
     private final AStarPlanner planner = new AStarPlanner(BuiltInCapabilities.all());
+
+    @Test
+    public void alreadyReachedGoalsSucceedWithEmptyPathsRegardlessOfAnchor() {
+        // 半径、区域和远离目标已达成时，不应因其表示点在范围外而拒绝。
+        List<NavGoal> goals = List.of(
+                NavGoals.within(START.offset(DISTANT_ANCHOR, 0, 0), DISTANT_ANCHOR),
+                NavGoals.region(new GridBounds(START.offset(-DISTANT_ANCHOR, 0, 0), START)),
+                NavGoals.awayFrom(START.offset(DISTANT_ANCHOR, 0, 0), SAFE_RADIUS));
+        for (NavGoal goal : goals) {
+            assertTrue(goal.reached(START));
+            NavRequest request = new NavRequest(START, goal, PROFILE, List.of(),
+                    new SearchBudget(NODE_BUDGET, SEARCH_RANGE));
+            NavResult result = planner.plan(flat(), request);
+            assertEquals(SearchStatus.SUCCESS, result.status());
+            NavPlan plan = result.plan().orElseThrow();
+            assertTrue(plan.edges().isEmpty());
+            assertEquals(START, plan.end());
+            assertEquals(0, plan.cost(), 0);
+        }
+    }
+
+    @Test
+    public void reachesNearbyBoundaryOfGoalWithDistantAnchor() {
+        // 起点尚未达成，但一格外就是目标集合，范围必须按集合距离判断。
+        NavGoal goal = NavGoals.within(START.offset(DISTANT_ANCHOR, 0, 0), DISTANT_ANCHOR - 1);
+        assertFalse(goal.reached(START));
+        NavRequest request = new NavRequest(START, goal, PROFILE, List.of(),
+                new SearchBudget(NODE_BUDGET, 1));
+        NavResult result = planner.plan(flat(), request);
+        assertEquals(SearchStatus.SUCCESS, result.status());
+        assertEquals(START.offset(1, 0, 0), result.plan().orElseThrow().end());
+    }
+
+    @Test
+    public void costLowerBoundDoesNotPruneAnOtherwiseReachableGoal() {
+        // 自定义目标只声明代价下界时，较高的地形费用不能被当作几何距离剪枝。
+        GridPos target = START.offset(1, 0, 0);
+        NavGoal goal = new NavGoal() {
+            @Override
+            public GridPos anchor() {
+                return target;
+            }
+
+            @Override
+            public boolean reached(GridPos position) {
+                return position.equals(target);
+            }
+
+            @Override
+            public double lowerBound(GridPos position) {
+                return position.distanceTo(target) * NODE_BUDGET;
+            }
+        };
+        NavRequest request = new NavRequest(START, goal, PROFILE, List.of(ignored -> NODE_BUDGET),
+                new SearchBudget(NODE_BUDGET, 1));
+        NavResult result = planner.plan(flat(), request);
+        assertEquals(SearchStatus.SUCCESS, result.status());
+        assertEquals(target, result.plan().orElseThrow().end());
+    }
 
     @Test
     public void climbsOneBlockStep() {

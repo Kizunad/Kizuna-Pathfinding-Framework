@@ -49,9 +49,22 @@ public final class AStarPlanner {
         if (!validStart(start)) {
             return grid.result(SearchStatus.INVALID_START, Optional.empty());
         }
-        if (startPosition.distanceTo(goal.anchor()) > budget.maxDistance()) {
+        if (goal.reached(startPosition)) {
+            NavPlan plan = new NavPlan(startPosition, List.of(), 0);
+            return grid.result(SearchStatus.SUCCESS, Optional.of(plan));
+        }
+        double minimumDistance = goal.distanceLowerBound(startPosition);
+        if (!Double.isFinite(minimumDistance) || minimumDistance < 0) {
+            throw new IllegalArgumentException("目标距离下界必须为有限非负数");
+        }
+        if (minimumDistance > budget.maxDistance()) {
             return grid.result(SearchStatus.GOAL_OUT_OF_RANGE, Optional.empty());
         }
+        return searchReachable(grid, request, rejectedMoves);
+    }
+
+    private NavResult searchReachable(SearchGrid grid, NavRequest request, Set<MoveKey> rejectedMoves) {
+        // 在已验证的起点与距离范围内扩展，保留稳定排序和完整路径重建。
         Search search = new Search(request);
         while (!search.open.isEmpty()) {
             Entry current = search.open.poll();
@@ -60,8 +73,8 @@ public final class AStarPlanner {
                 continue;
             }
             grid.visitNode();
-            if (goal.reached(currentPosition)) {
-                NavPlan plan = reconstruct(startPosition, current, search.previous);
+            if (request.goal().reached(currentPosition)) {
+                NavPlan plan = reconstruct(request.start(), current, search.previous);
                 return grid.result(SearchStatus.SUCCESS, Optional.of(plan));
             }
             expand(grid, request, rejectedMoves, current, search);
